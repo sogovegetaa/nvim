@@ -1,6 +1,5 @@
 vim.g.mapleader = ' '
 vim.g.maplocalleader = ' '
-vim.keymap.set("n", "<leader>L", "<cmd>Avante<cr>", { desc = "Открыть Avante" })
 vim.opt.wrap = false
 vim.opt.termguicolors = true
 vim.g.neovide_scroll_animation_length = 0.5
@@ -36,6 +35,12 @@ vim.opt.mouse = 'a'
 
 vim.opt.showmode = false
 
+-- Tabs / indentation (дефолты). Без этого Neovim часто использует tabstop=8 → "огромные табы".
+vim.opt.expandtab = true     -- вставлять пробелы вместо таба
+vim.opt.tabstop = 2          -- визуальная ширина \t
+vim.opt.shiftwidth = 2       -- размер отступа для >>, <<, автоиндента
+vim.opt.softtabstop = 2      -- сколько пробелов ставит <Tab> в insert
+
 -- Sync clipboard between OS and Neovim.
 --  Schedule the setting after `UiEnter` because it can increase startup-time.
 --  Remove this option if you want your OS clipboard to remain independent.
@@ -69,7 +74,8 @@ vim.opt.splitbelow = true
 
 -- Sets how neovim will display certain whitespace characters in the editor.
 --  and `:help 'listchars'`
-vim.opt.list = true
+-- Визуализация табов/пробелов (те самые ">>"). По умолчанию выключаем, чтобы не мешало.
+vim.opt.list = false
 vim.opt.listchars = { tab = '» ', trail = '·', nbsp = '␣' }
 
 -- Preview substitutions live, as you type!
@@ -99,6 +105,11 @@ vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, { desc = 'Go to previues [D]
 vim.keymap.set('n', ']d', vim.diagnostic.goto_next, { desc = 'Go to previues [D]iagnostic message' })
 vim.keymap.set('n', '<leader>de', vim.diagnostic.open_float, { desc = 'Посмотреть полное сообщение об ошибке' })
 
+-- Toggle отображения невидимых символов (tab/trailing spaces и т.п.)
+vim.keymap.set('n', '<leader>tl', function()
+  vim.opt.list = not vim.opt.list:get()
+end, { desc = '[T]oggle [L]istchars' })
+
 -- Exit terminal mode in the builtin terminal with a shortcut that is a bit easier
 -- for people to discover. Otherwise, you normally need to press <C-\><C-n>, which
 -- is not what someone will guess without a bit more experience.
@@ -108,10 +119,10 @@ vim.keymap.set('n', '<leader>de', vim.diagnostic.open_float, { desc = 'Посм�
 vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
 
 -- TIP: Disable arrow keys in normal mode
--- vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
--- vim.keymap.set('n', '<right>', '<cmd>echo "Use l to move!!"<CR>')
--- vim.keymap.set('n', '<up>', '<cmd>echo "Use k to move!!"<CR>')
--- vim.keymap.set('n', '<down>', '<cmd>echo "Use j to move!!"<CR>')
+vim.keymap.set('n', '<left>', '<cmd>echo "Use h to move!!"<CR>')
+vim.keymap.set('n', '<right>', '<cmd>echo "Use l to move!!"<CR>')
+vim.keymap.set('n', '<up>', '<cmd>echo "Use k to move!!"<CR>')
+vim.keymap.set('n', '<down>', '<cmd>echo "Use j to move!!"<CR>')
 
 -- Keybinds to make split navigation easier.
 --  Use CTRL+<hjkl> to switch between windows
@@ -712,19 +723,48 @@ require('lazy').setup({
       --  - capabilities (table): Override fields in capabilities. Can be used to disable certain LSP features.
       --  - settings (table): Override the default settings passed when initializing the server.
       --        For example, to see the options for `lua_ls`, you could go to: https://luals.github.io/wiki/settings/
+      local util = require('lspconfig.util')
+
+      ---Проверяет, есть ли в корне ESLint конфиг (включая eslintConfig в package.json).
+      ---Если конфига нет — eslint-lsp не должен стартовать, чтобы не спамить ошибками.
+      ---@param root string
+      ---@return boolean
+      local function has_eslint_config(root)
+        local config_files = {
+          -- ESLint v9+ flat config
+          'eslint.config.js',
+          'eslint.config.mjs',
+          'eslint.config.cjs',
+          -- legacy configs
+          '.eslintrc',
+          '.eslintrc.json',
+          '.eslintrc.js',
+          '.eslintrc.cjs',
+          '.eslintrc.yml',
+          '.eslintrc.yaml',
+        }
+
+        for _, f in ipairs(config_files) do
+          if util.path.exists(util.path.join(root, f)) then
+            return true
+          end
+        end
+
+        local pkg = util.path.join(root, 'package.json')
+        if util.path.exists(pkg) then
+          local ok, lines = pcall(vim.fn.readfile, pkg)
+          if ok and lines and #lines > 0 then
+            local ok2, decoded = pcall(vim.json.decode, table.concat(lines, '\n'))
+            if ok2 and type(decoded) == 'table' and decoded.eslintConfig ~= nil then
+              return true
+            end
+          end
+        end
+
+        return false
+      end
+
       local servers = {
-
-        eslint = {
-          settings = {
-            rulesCustomizations = {
-              {
-                rule = 'camelcase',
-                severity = 'off',
-              },
-            },
-          },
-        },
-
         lua_ls = {
           -- cmd = { ... },
           -- filetypes = { ... },
@@ -737,6 +777,41 @@ require('lazy').setup({
               -- You can toggle below to ignore Lua_LS's noisy `missing-fields` warnings
               -- diagnostics = { disable = { 'missing-fields' } },
             },
+          },
+        },
+        -- Важно: не запускаем eslint-lsp в проектах без ESLint-конфига
+        -- (иначе получаем "Could not find config file" в diagnostics).
+        eslint = {
+          single_file_support = false,
+          root_dir = function(fname)
+            -- 1) Самый точный случай: рядом есть eslint-конфиг
+            local root = util.root_pattern(
+              'eslint.config.js',
+              'eslint.config.mjs',
+              'eslint.config.cjs',
+              '.eslintrc',
+              '.eslintrc.json',
+              '.eslintrc.js',
+              '.eslintrc.cjs',
+              '.eslintrc.yml',
+              '.eslintrc.yaml'
+            )(fname)
+            if root then
+              return root
+            end
+
+            -- 2) Если нашли только package.json — стартуем ТОЛЬКО когда там есть eslintConfig
+            local pkg_root = util.root_pattern('package.json')(fname)
+            if pkg_root and has_eslint_config(pkg_root) then
+              return pkg_root
+            end
+
+            -- 3) Нет конфига → не стартуем сервер
+            return nil
+          end,
+          settings = {
+            -- auto подхват рабочей директории, когда конфиг всё-таки есть
+            workingDirectory = { mode = 'auto' },
           },
         },
       }
@@ -931,31 +1006,52 @@ require('lazy').setup({
       }
     end,
   },
-  {
-    'rose-pine/neovim',
-    name = 'rose-pine',
-    lazy = false,
-    priority = 1000,
+{ -- You can easily change to a different colorscheme.
+    -- Change the name of the colorscheme plugin below, and then
+    -- change the command in the config to whatever the name of that colorscheme is.
+    --
+    -- If you want to see what colorschemes are already installed, you can use `:Telescope colorscheme`.
+    'folke/tokyonight.nvim',
+    priority = 1000, -- Make sure to load this before all the other start plugins.
     config = function()
-      require('rose-pine').setup {
-        disable_background = true,
+      ---@diagnostic disable-next-line: missing-fields
+      require('tokyonight').setup {
         styles = {
-          italic = false,
+          comments = { italic = false }, -- Disable italics in comments
         },
       }
 
-      -- Функция для применения темы + убираем фон у Normal и Float
-      function ColorMyPencils(color)
-        color = color or 'rose-pine'
-        vim.cmd.colorscheme(color)
-
-        vim.api.nvim_set_hl(0, 'Normal', { bg = 'none' })
-        vim.api.nvim_set_hl(0, 'NormalFloat', { bg = 'none' })
-      end
-
-      ColorMyPencils()
+      -- Load the colorscheme here.
+      -- Like many other themes, this one has different styles, and you could load
+      -- any other, such as 'tokyonight-storm', 'tokyonight-moon', or 'tokyonight-day'.
+      vim.cmd.colorscheme 'tokyonight-night'
     end,
   },
+  -- {
+  --   'rose-pine/neovim',
+  --   name = 'rose-pine',
+  --   lazy = false,
+  --   priority = 1000,
+  --   config = function()
+  --     require('rose-pine').setup {
+  --       disable_background = true,
+  --       styles = {
+  --         italic = false,
+  --       },
+  --     }
+  --
+  --     -- Функция для применения темы + убираем фон у Normal и Float
+  --     function ColorMyPencils(color)
+  --       color = color or 'rose-pine'
+  --       vim.cmd.colorscheme(color)
+  --
+  --       vim.api.nvim_set_hl(0, 'Normal', { bg = 'none' })
+  --       vim.api.nvim_set_hl(0, 'NormalFloat', { bg = 'none' })
+  --     end
+  --
+  --     ColorMyPencils()
+  --   end,
+  -- },
   -- Highlight todo, notes, etc in comments
   { 'folke/todo-comments.nvim', event = 'VimEnter', dependencies = { 'nvim-lua/plenary.nvim' }, opts = { signs = false } },
 
